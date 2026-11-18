@@ -1,11 +1,17 @@
 """Build the native Apple Silicon app with the installed Apple compiler only."""
+import argparse
 from pathlib import Path
 import plistlib
 import shutil
 import subprocess
 
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--release", action="store_true", help="sign with the official Developer ID Application identity")
+release = parser.parse_args().release
+name = "LoopCapture" if release else "LoopCapture Dev"
+identifier = "local.rahul.LoopCapture" if release else "local.rahul.LoopCapture.dev"
 root = Path(__file__).resolve().parent
-app = root / "build/LoopCapture.app"
+app = root / "build" / f"{name}.app"
 contents = app / "Contents"
 (contents / "MacOS").mkdir(parents=True, exist_ok=True)
 resources = contents / "Resources"
@@ -13,12 +19,12 @@ resources.mkdir(exist_ok=True)
 shutil.copyfile(root / "LICENSE", resources / "LICENSE")
 plist = {
     "CFBundleExecutable": "LoopCapture",
-    "CFBundleIdentifier": "local.rahul.LoopCapture",
-    "CFBundleName": "LoopCapture",
-    "CFBundleDisplayName": "LoopCapture",
+    "CFBundleIdentifier": identifier,
+    "CFBundleName": name,
+    "CFBundleDisplayName": name,
     "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "1.0",
-    "CFBundleVersion": "1",
+    "CFBundleShortVersionString": "1.0.1",
+    "CFBundleVersion": "2",
     "LSMinimumSystemVersion": "15.0",
     "LSUIElement": True,
     "LSRequiresNativeExecution": True,
@@ -43,6 +49,8 @@ if result.returncode:
     raise SystemExit(result.returncode)
 if result.stderr:
     print(result.stderr)
-subprocess.run(["codesign", "--force", "--sign", "-", "--identifier", "local.rahul.LoopCapture", str(app)], check=True)
+signing = ["--sign", "Developer ID Application: Rahul Nath (XV2AQBZSXC)", "--options", "runtime", "--timestamp"] if release else ["--sign", "-"]
+subprocess.run(["codesign", "--force", *signing, "--identifier", identifier, app], check=True)
+subprocess.run(["codesign", "--verify", "--strict", app], check=True)
 subprocess.run([str(contents / "MacOS/LoopCapture"), "--self-test"], check=True)
 print(app)

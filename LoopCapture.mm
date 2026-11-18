@@ -5,6 +5,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <ImageIO/ImageIO.h>
 #include <variant>
+#include <optional>
 #include <sys/file.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -348,11 +349,43 @@ struct Publishing { NSURL *draft; explicit Publishing(NSURL *v):draft(v) { NSCAs
 struct Reviewing { Preview *value; explicit Reviewing(Preview *v):value(v) { NSCAssert(v,@"Missing preview"); } };
 using State = std::variant<Idle,Selecting,Preparing,Starting,Recording,Finishing,Publishing,Reviewing>;
 
+static constexpr UInt32 CaptureModifiers = cmdKey | shiftKey | controlKey;
+static constexpr UInt32 DigitKeyCodes[] = {kVK_ANSI_5,kVK_ANSI_6,kVK_ANSI_7,kVK_ANSI_8,kVK_ANSI_9};
+static NSString *ShortcutLabel(int digit) { return [NSString stringWithFormat:@"⌘⇧⌃%d",digit]; }
+struct Shortcut { int digit; EventHotKeyRef ref; };
+struct AllShortcutsTaken {};
+struct ShortcutError { OSStatus status; };
+using ShortcutResult = std::variant<Shortcut,AllShortcutsTaken,ShortcutError>;
+
+// The successful registration stays reserved while the user considers the offer.
+template <typename Register>
+static ShortcutResult FindShortcut(int first,int skip,Register reserve) {
+    for (int offset=0; offset<5; ++offset) {
+        int digit = 5 + (first-5+offset)%5;
+        if (digit == skip) continue;
+        EventHotKeyRef ref = nullptr;
+        OSStatus status = reserve(digit,DigitKeyCodes[digit-5],&ref);
+        if (status == noErr) return Shortcut{digit,ref};
+        if (status != eventHotKeyExistsErr) return ShortcutError{status};
+    }
+    return AllShortcutsTaken{};
+}
+static bool IsSystemShortcut(NSArray *systemKeys,UInt32 code) {
+    for (NSDictionary *key in systemKeys) {
+        if ([key[(__bridge NSString *)kHISymbolicHotKeyEnabled] boolValue] &&
+            [key[(__bridge NSString *)kHISymbolicHotKeyCode] unsignedIntValue] == code &&
+            [key[(__bridge NSString *)kHISymbolicHotKeyModifiers] unsignedIntValue] == CaptureModifiers) return true;
+    }
+    return false;
+}
+
 @interface App : NSObject <NSApplicationDelegate> {
     State _state;
-    EventHotKeyRef _mainKey, _spaceKey;
+    std::optional<Shortcut> _shortcut;
+    EventHotKeyRef _spaceKey;
     EventHandlerRef _handler;
     NSStatusItem *_status;
+    NSMenuItem *_recordItem;
     NSTimer *_timer;
     NSURL *_drafts;
     BOOL _permissionRequested;
@@ -360,13 +393,15 @@ using State = std::variant<Idle,Selecting,Preparing,Starting,Recording,Finishing
 }
 - (void)toggle:(id)sender;
 - (void)stop:(id)sender;
+- (void)shortcutPressed:(UInt32)digit;
 @end
 
 static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *pointer) {
     EventHotKeyID key = {};
     GetEventParameter(event,kEventParamDirectObject,typeEventHotKeyID,NULL,sizeof(key),NULL,&key);
     App *app = (__bridge App *)pointer;
-    if (key.id == 2) [app stop:nil]; else [app toggle:nil];
+    if (key.signature != 0x4c434150) return eventNotHandledErr;
+    if (key.id == 2) [app stop:nil]; else [app shortcutPressed:key.id];
     return noErr;
 }
 @implementation App
@@ -375,32 +410,103 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
     NSAlert *alert = [NSAlert new]; alert.messageText = @"LoopCapture"; alert.informativeText = message; [alert runModal];
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    _lock = open([[NSString stringWithFormat:@"/tmp/loopcapture-%d.lock",getuid()] UTF8String],O_CREAT|O_RDWR,0600);
+    NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
+    // Preserve the release lock and drafts from earlier versions across updates.
+    BOOL release = [bundleID isEqualToString:@"local.rahul.LoopCapture"];
+    NSString *lockName = release ? @"loopcapture" : bundleID;
+    _lock = open([[NSString stringWithFormat:@"/tmp/%@-%d.lock",lockName,getuid()] UTF8String],O_CREAT|O_RDWR,0600);
     if (_lock < 0 || flock(_lock,LOCK_EX|LOCK_NB)) {
-        for (NSRunningApplication *app in [NSRunningApplication runningApplicationsWithBundleIdentifier:@"local.rahul.LoopCapture"])
+        for (NSRunningApplication *app in [NSRunningApplication runningApplicationsWithBundleIdentifier:bundleID])
             if (app.processIdentifier != getpid()) [app activateWithOptions:NSApplicationActivateAllWindows];
         [NSApp terminate:nil]; return;
     }
-    _drafts = [[NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask][0] URLByAppendingPathComponent:@"LoopCapture/Drafts" isDirectory:YES];
+    NSString *draftsPath = release ? @"LoopCapture/Drafts" : [bundleID stringByAppendingPathComponent:@"Drafts"];
+    _drafts = [[NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask][0] URLByAppendingPathComponent:draftsPath isDirectory:YES];
     NSError *error = nil;
     if (![NSFileManager.defaultManager createDirectoryAtURL:_drafts withIntermediateDirectories:YES attributes:nil error:&error]) { [self alert:error.localizedDescription]; [NSApp terminate:nil]; return; }
-    EventTypeSpec event = {kEventClassKeyboard,kEventHotKeyPressed};
-    OSStatus installed = InstallEventHandler(GetApplicationEventTarget(),HotKeyHandler,1,&event,(__bridge void *)self,&_handler);
-    OSStatus registered = RegisterEventHotKey(23,cmdKey|shiftKey|controlKey,{0x4c434150,1},GetApplicationEventTarget(),0,&_mainKey);
-    if (installed || registered) { [self alert:@"Could not register ⌘⇧⌃5. Another app may already use it."]; [NSApp terminate:nil]; return; }
     NSMenu *menu = [NSMenu new];
-    [menu addItemWithTitle:@"Record Area  ⌘⇧⌃5" action:@selector(toggle:) keyEquivalent:@""];
+    _recordItem = [menu addItemWithTitle:@"Record Area" action:@selector(toggle:) keyEquivalent:@""];
     [menu addItemWithTitle:@"Stop Recording  Space" action:@selector(stop:) keyEquivalent:@""];
+    [menu addItemWithTitle:@"Try Next Recording Shortcut…" action:@selector(nextShortcut:) keyEquivalent:@""];
     [menu addItemWithTitle:@"Screen Recording Access…" action:@selector(permissionSettings:) keyEquivalent:@""];
     [menu addItem:NSMenuItem.separatorItem];
     [menu addItemWithTitle:@"Quit LoopCapture" action:@selector(quit:) keyEquivalent:@"q"];
     for (NSMenuItem *item in menu.itemArray) item.target = self;
     _status = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
     _status.button.image = [NSImage imageWithSystemSymbolName:@"record.circle" accessibilityDescription:@"LoopCapture"];
-    _status.button.toolTip = @"LoopCapture - ⌘⇧⌃5"; _status.menu = menu;
+    _status.button.toolTip = @"LoopCapture"; _status.menu = menu;
     NSMenu *main = [NSMenu new]; NSMenuItem *item = [NSMenuItem new]; item.submenu = menu; [main addItem:item]; NSApp.mainMenu = main;
+    [self configureShortcut:NO];
     NSArray<NSURL *> *drafts = [NSFileManager.defaultManager contentsOfDirectoryAtURL:_drafts includingPropertiesForKeys:nil options:0 error:nil];
     for (NSURL *url in drafts) if ([url.pathExtension isEqualToString:@"mp4"]) { [self preview:url]; return; }
+}
+- (void)shortcutPressed:(UInt32)digit {
+    if (!NSApp.modalWindow && _shortcut && (UInt32)_shortcut->digit == digit) [self toggle:nil];
+}
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(nextShortcut:))
+        return std::holds_alternative<Idle>(_state) || std::holds_alternative<Reviewing>(_state);
+    return YES;
+}
+- (void)nextShortcut:(id)sender { [self configureShortcut:YES]; }
+- (void)configureShortcut:(BOOL)requested {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults registerDefaults:@{@"RecordingShortcutDigit": @5}];
+    NSInteger preferred = [defaults integerForKey:@"RecordingShortcutDigit"];
+    if (preferred != 0 && (preferred < 5 || preferred > 9)) preferred = 5;
+    OSStatus status = noErr;
+    if (!_handler) {
+        EventTypeSpec event = {kEventClassKeyboard,kEventHotKeyPressed};
+        status = InstallEventHandler(GetApplicationEventTarget(),HotKeyHandler,1,&event,(__bridge void *)self,&_handler);
+        if (status != noErr) {
+            [self alert:[NSString stringWithFormat:@"Keyboard shortcuts are unavailable (macOS error %d). Use the LoopCapture menu to record and stop.",(int)status]];
+            return;
+        }
+    }
+    if (!requested && preferred == 0) return;
+    int current = _shortcut ? _shortcut->digit : 0;
+    int first = current ? 5 + (current-5+1)%5 : preferred ? (int)preferred : 5;
+    CFArrayRef keys = nullptr;
+    status = CopySymbolicHotKeys(&keys);
+    NSArray *systemKeys = CFBridgingRelease(keys);
+    if (status != noErr) {
+        [self alert:[NSString stringWithFormat:@"Could not check system keyboard shortcuts (macOS error %d). Use Record Area in the LoopCapture menu.",(int)status]];
+        return;
+    }
+    ShortcutResult result = FindShortcut(first,current,[&](int digit,UInt32 code,EventHotKeyRef *ref) -> OSStatus {
+        if (IsSystemShortcut(systemKeys,code)) return eventHotKeyExistsErr;
+        return RegisterEventHotKey(code,CaptureModifiers,{0x4c434150,(UInt32)digit},GetApplicationEventTarget(),kEventHotKeyExclusive,ref);
+    });
+    if (auto error = std::get_if<ShortcutError>(&result)) {
+        [self alert:[NSString stringWithFormat:@"Keyboard shortcut registration failed (macOS error %d). Use Record Area in the LoopCapture menu.",(int)error->status]];
+        return;
+    }
+    auto candidate = std::get_if<Shortcut>(&result);
+    if (!candidate) {
+        [self alert:current ? @"All other recording shortcuts from 5 through 9 are in use. Your current shortcut is still active." :
+                              @"The recording shortcuts from ⌘⇧⌃5 through ⌘⇧⌃9 are all in use. Choose Record Area in the LoopCapture menu, or try again after changing the conflicting shortcuts."];
+        return;
+    }
+    NSString *label = ShortcutLabel(candidate->digit);
+    if (requested || candidate->digit != preferred) {
+        NSAlert *offer = [NSAlert new];
+        offer.messageText = [NSString stringWithFormat:@"Use %@ for LoopCapture?",label];
+        offer.informativeText = !requested ? [NSString stringWithFormat:@"%@ is already in use. %@ is the next available recording shortcut.",ShortcutLabel((int)preferred),label] :
+                                            @"The shortcut starts a recording selection or stops a recording.";
+        [offer addButtonWithTitle:[@"Use " stringByAppendingString:label]];
+        [offer addButtonWithTitle:current ? @"Keep Current Shortcut" : @"Use Menu Only"];
+        [NSApp activateIgnoringOtherApps:YES];
+        if ([offer runModal] != NSAlertFirstButtonReturn) {
+            UnregisterEventHotKey(candidate->ref);
+            if (!current) [defaults setInteger:0 forKey:@"RecordingShortcutDigit"];
+            return;
+        }
+    }
+    if (_shortcut) UnregisterEventHotKey(_shortcut->ref);
+    _shortcut = *candidate;
+    [defaults setInteger:candidate->digit forKey:@"RecordingShortcutDigit"];
+    _recordItem.title = [@"Record Area  " stringByAppendingString:label];
+    _status.button.toolTip = [@"LoopCapture - " stringByAppendingString:label];
 }
 - (void)toggle:(id)sender {
     if (std::holds_alternative<Idle>(_state)) [self select];
@@ -409,14 +515,22 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
     else if (auto review = std::get_if<Reviewing>(&_state)) { [review->value finish]; [self select]; }
 }
 - (void)select {
-    if (!CGPreflightScreenCaptureAccess()) {
-        if (!_permissionRequested) {
-            _permissionRequested = YES;
-            CGRequestScreenCaptureAccess();
-            if (CGPreflightScreenCaptureAccess()) { [self select]; return; }
-            [self permissionSettings:nil];
-        }
-        _status.button.toolTip = @"Enable LoopCapture in Screen Recording settings, then reopen it.";
+    BOOL authorized = CGPreflightScreenCaptureAccess();
+    if (!authorized && !_permissionRequested) {
+        _permissionRequested = YES;
+        authorized = CGRequestScreenCaptureAccess();
+    }
+    if (!authorized) {
+        [NSApp activateIgnoringOtherApps:YES];
+        NSAlert *alert = [NSAlert new];
+        alert.messageText = @"Allow screen and system audio recording";
+        alert.informativeText = [NSString stringWithFormat:
+            @"In System Settings, enable the app at %@ and choose Quit & Reopen if macOS asks. "
+             "If an older LoopCapture entry is already enabled and recording still fails, remove that entry with the minus button, then add this copy with the plus button.",
+            NSBundle.mainBundle.bundlePath];
+        [alert addButtonWithTitle:@"Open Settings"];
+        [alert addButtonWithTitle:@"Cancel"];
+        if ([alert runModal] == NSAlertFirstButtonReturn) [self permissionSettings:nil];
         return;
     }
     NSScreen *screen = NSScreen.mainScreen;
@@ -461,7 +575,7 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
                 auto starting = std::get_if<Starting>(&self->_state);
                 if (!starting || starting->value != active) return;
                 self->_state = Recording(active);
-                BOOL space = RegisterEventHotKey(49,0,{0x4c434150,2},GetApplicationEventTarget(),0,&self->_spaceKey) == noErr;
+                BOOL space = self->_handler && RegisterEventHotKey(49,0,{0x4c434150,2},GetApplicationEventTarget(),0,&self->_spaceKey) == noErr;
                 [self showRecordingStatus:space];
             };
             capture.finished = ^{
@@ -484,7 +598,11 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
 }
 - (void)showRecordingStatus:(BOOL)space {
     _status.button.image = [NSImage imageWithSystemSymbolName:@"stop.circle.fill" accessibilityDescription:@"Recording"];
-    _status.button.toolTip = space ? @"Recording • Space or ⌘⇧⌃5 stops" : @"Recording • ⌘⇧⌃5 stops";
+    NSMutableArray<NSString *> *keys = [NSMutableArray array];
+    if (space) [keys addObject:@"Space"];
+    if (_shortcut) [keys addObject:ShortcutLabel(_shortcut->digit)];
+    _status.button.toolTip = keys.count ? [NSString stringWithFormat:@"Recording • %@ stops",[keys componentsJoinedByString:@" or "]] :
+                                          @"Recording • Choose Stop Recording in the LoopCapture menu";
     __weak App *weakSelf = self;
     _timer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
         App *self = weakSelf; if (!self) return;
@@ -498,7 +616,7 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
 - (void)resetRecordingStatus {
     [_timer invalidate]; _timer = nil;
     _status.button.title = @""; _status.button.image = [NSImage imageWithSystemSymbolName:@"record.circle" accessibilityDescription:@"LoopCapture"];
-    _status.button.toolTip = @"LoopCapture - ⌘⇧⌃5";
+    _status.button.toolTip = _shortcut ? [@"LoopCapture - " stringByAppendingString:ShortcutLabel(_shortcut->digit)] : @"LoopCapture";
 }
 - (void)stop:(id)sender {
     auto recording = std::get_if<Recording>(&_state); if (!recording) return;
@@ -552,12 +670,38 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
     else [self toggle:nil];
 }
 - (void)applicationWillTerminate:(NSNotification *)notification {
-    [self disableSpace]; if (_mainKey) UnregisterEventHotKey(_mainKey); if (_handler) RemoveEventHandler(_handler);
+    [self disableSpace]; if (_shortcut) UnregisterEventHotKey(_shortcut->ref); if (_handler) RemoveEventHandler(_handler);
     if (_lock >= 0) close(_lock);
 }
 @end
 
 static int SelfTest() {
+    auto probe = [](int first,int current,NSIndexSet *available) {
+        return FindShortcut(first,current,[=](int digit,UInt32 code,EventHotKeyRef *ref) -> OSStatus {
+            return [available containsIndex:digit] ? noErr : eventHotKeyExistsErr;
+        });
+    };
+    NSIndexSet *all = [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(5,5)];
+    NSCAssert(std::get<Shortcut>(probe(5,0,all)).digit == 5,@"Default shortcut");
+    NSCAssert(std::get<Shortcut>(probe(7,0,all)).digit == 7,@"Restore user's choice");
+    NSCAssert(std::get<Shortcut>(probe(5,0,[NSIndexSet indexSetWithIndex:7])).digit == 7,@"Skip conflicts");
+    NSCAssert(std::get<Shortcut>(probe(8,7,[NSIndexSet indexSetWithIndex:5])).digit == 5,@"Wrap around after 9");
+    NSCAssert(std::holds_alternative<AllShortcutsTaken>(probe(5,0,[NSIndexSet indexSet])),@"Menu-only when all unavailable");
+    NSCAssert(std::holds_alternative<AllShortcutsTaken>(probe(8,7,[NSIndexSet indexSetWithIndex:7])),@"Keep active binding if other four conflict");
+    int attempts = 0;
+    auto failure = FindShortcut(5,0,[&](int,UInt32,EventHotKeyRef *) -> OSStatus { ++attempts; return paramErr; });
+    NSCAssert(std::get<ShortcutError>(failure).status == paramErr && attempts == 1,@"Report unexpected registration errors");
+    NSDictionary *key = @{(__bridge NSString *)kHISymbolicHotKeyCode: @(kVK_ANSI_5),
+                          (__bridge NSString *)kHISymbolicHotKeyModifiers: @(CaptureModifiers),
+                          (__bridge NSString *)kHISymbolicHotKeyEnabled: @YES};
+    NSCAssert(IsSystemShortcut(@[key],kVK_ANSI_5) && !IsSystemShortcut(@[key],kVK_ANSI_6),@"Respect the enabled macOS shortcut");
+    NSMutableDictionary *changed = [key mutableCopy];
+    changed[(__bridge NSString *)kHISymbolicHotKeyModifiers] = @(cmdKey | shiftKey);
+    NSCAssert(!IsSystemShortcut(@[changed],kVK_ANSI_5),@"The native Screenshot shortcut uses different modifiers");
+    changed[(__bridge NSString *)kHISymbolicHotKeyModifiers] = @(CaptureModifiers);
+    changed[(__bridge NSString *)kHISymbolicHotKeyEnabled] = @NO;
+    NSCAssert(!IsSystemShortcut(@[changed],kVK_ANSI_5),@"Ignore disabled system shortcuts");
+    puts("PASS: shortcut selection, preference, conflicts, wraparound, exhaustion, system keyboard bindings and registration failures");
     NSCAssert(NSEqualRects(CaptureRect(NSMakeRect(-1400,-800,300,200),NSMakeRect(-1600,-900,1600,900)),NSMakeRect(200,600,300,200)),@"Secondary-display coordinates");
     NSURL *directory = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString] isDirectory:YES];
     NSError *error = nil;
