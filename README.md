@@ -6,6 +6,12 @@ If a silent loop gets the point across, turn the same clip into a GIF right in t
 
 **[Download LoopCapture for Mac](https://github.com/rahul-nath/LoopCapture/releases/latest/download/LoopCapture-macOS-arm64.pkg)** · Apple Silicon (M-series) · macOS 15 or later
 
+## Watch the 20-second demo
+
+[![Animated walkthrough showing the recording shortcut, drag selection, and pasting a GIF into a message](docs/media/demo-preview.gif)](docs/media/loopcapture-demo.mp4)
+
+[Open the full-resolution MP4](docs/media/loopcapture-demo.mp4).
+
 ## Install and start
 
 1. Double-click the downloaded **LoopCapture-macOS-arm64.pkg** and follow the Installer prompts.
