@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LoopCapture paste test</title>
+<style>
+  :root { color-scheme: light dark; font: 16px system-ui; }
+  body { max-width: 850px; margin: 48px auto; padding: 0 24px; }
+  h1 { font-size: 28px; }
+  clip-input { display: grid; gap: 16px; }
+  .paste-zone { border: 2px dashed #888; border-radius: 12px; padding: 28px; }
+  .paste-zone:focus { outline: 3px solid #4285f4; }
+  output { overflow-wrap: anywhere; }
+  img, video { max-width: 100%; max-height: 540px; border-radius: 12px; }
+</style>
+<h1>Paste a clip</h1>
+<p>LoopCapture copies an animated GIF automatically. Use Copy Video in its preview for MP4.</p>
+<clip-input></clip-input>
+<script type="module" src="./clip-input.js"></script>
+</html>
