@@ -74,8 +74,65 @@ static BOOL ExportGIF(NSURL *movie, NSURL *gif, NSError **error) {
     if (!success) [NSFileManager.defaultManager removeItemAtURL:gif error:nil];
     return success;
 }
+static NSArray<AVAssetTrack *> *MovieTracks(AVAsset *asset, AVMediaType type) {
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    __block NSArray<AVAssetTrack *> *tracks;
+    [asset loadTracksWithMediaType:type completionHandler:^(NSArray<AVAssetTrack *> *result, NSError *error) {
+        tracks = error ? nil : result;
+        dispatch_semaphore_signal(done);
+    }];
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    return tracks;
+}
+
+// Called on the publishing queue after the original MP4 is safely saved.
+static BOOL CompactMovie(NSURL *movie) {
+    AVURLAsset *input = [AVURLAsset URLAssetWithURL:movie options:nil];
+    double seconds = CMTimeGetSeconds(input.duration);
+    if (!isfinite(seconds) || seconds <= 0) return NO;
+    NSNumber *originalSize = nil;
+    if (![movie getResourceValue:&originalSize forKey:NSURLFileSizeKey error:nil]) return NO;
+    if (originalSize.longLongValue <= seconds * (2e9 / 3600)) return YES;
+
+    AVAssetExportSession *exporter = [[AVAssetExportSession alloc] initWithAsset:input
+        presetName:AVAssetExportPresetHighestQuality];
+    if (!exporter) return NO;
+    NSURL *candidate = [[movie URLByDeletingLastPathComponent] URLByAppendingPathComponent:
+        [NSString stringWithFormat:@".compact-%@.mp4", NSUUID.UUID.UUIDString]];
+    exporter.outputURL = candidate;
+    exporter.outputFileType = AVFileTypeMPEG4;
+    exporter.fileLengthLimit = MAX(1, (long long)(seconds * (3928000.0 / 8)));
+    dispatch_semaphore_t finished = dispatch_semaphore_create(0);
+    [exporter exportAsynchronouslyWithCompletionHandler:^{ dispatch_semaphore_signal(finished); }];
+    dispatch_semaphore_wait(finished, DISPATCH_TIME_FOREVER);
+
+    NSFileManager *files = NSFileManager.defaultManager;
+    BOOL valid = exporter.status == AVAssetExportSessionStatusCompleted;
+    if (valid) {
+        AVURLAsset *result = [AVURLAsset URLAssetWithURL:candidate options:nil];
+        NSNumber *size = nil;
+        valid = [candidate getResourceValue:&size forKey:NSURLFileSizeKey error:nil]
+            && size.longLongValue > 0 && size.longLongValue < originalSize.longLongValue
+            && fabs(CMTimeGetSeconds(result.duration) - seconds) <= 0.1;
+        for (AVMediaType type in @[AVMediaTypeVideo, AVMediaTypeAudio]) {
+            NSArray<AVAssetTrack *> *before = MovieTracks(input, type);
+            NSArray<AVAssetTrack *> *after = MovieTracks(result, type);
+            valid = valid && before && after && before.count == after.count;
+            for (NSUInteger i = 0; valid && i < before.count; i++) {
+                CMTimeRange a = before[i].timeRange, b = after[i].timeRange;
+                valid = fabs(CMTimeGetSeconds(a.start) - CMTimeGetSeconds(b.start)) <= 0.1
+                    && fabs(CMTimeGetSeconds(CMTimeRangeGetEnd(a)) - CMTimeGetSeconds(CMTimeRangeGetEnd(b))) <= 0.1;
+            }
+        }
+    }
+    if (valid) valid = [files replaceItemAtURL:movie withItemAtURL:candidate backupItemName:nil
+                                      options:0 resultingItemURL:nil error:nil];
+    [files removeItemAtURL:candidate error:nil];
+    return valid;
+}
+
 static BOOL CopyClip(NSURL *url, BOOL image) {
-    NSData *data = [NSData dataWithContentsOfURL:url];
+    NSData *data = [NSData dataWithContentsOfURL:url options:NSDataReadingMappedIfSafe error:nil];
     if (!data) return NO;
     NSPasteboardItem *item = [NSPasteboardItem new];
     [item setString:url.absoluteString forType:NSPasteboardTypeFileURL];
@@ -175,7 +232,7 @@ static BOOL CopyClip(NSURL *url, BOOL image) {
         SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingApplications:ownApp exceptingWindows:@[]];
         SCStreamConfiguration *config = [SCStreamConfiguration new];
         config.sourceRect = rect;
-        CGFloat pixels = MIN(scale, 3840/MAX(rect.size.width,rect.size.height));
+        CGFloat pixels = MIN(scale, 1920/MAX(rect.size.width,rect.size.height));
         config.width = MAX(2,(NSInteger)(rect.size.width*pixels)/2*2);
         config.height = MAX(2,(NSInteger)(rect.size.height*pixels)/2*2);
         config.minimumFrameInterval = CMTimeMake(1,30); config.showsCursor = YES;
@@ -208,17 +265,18 @@ static BOOL CopyClip(NSURL *url, BOOL image) {
 @interface Preview : NSObject <NSWindowDelegate>
 @property(strong) NSURL *url;
 @property(strong) NSURL *gif;
+@property(strong) NSButton *gifButton;
 @property(strong) NSWindow *window;
 @property(strong) AVQueuePlayer *player;
 @property(strong) AVPlayerLooper *looper;
 @property(copy) void (^closed)(void);
 @property(copy) void (^failed)(NSString *);
-- (instancetype)initWithURL:(NSURL *)url gif:(NSURL *)gif;
+- (instancetype)initWithURL:(NSURL *)url;
 @end
 @implementation Preview
-- (instancetype)initWithURL:(NSURL *)url gif:(NSURL *)gif {
+- (instancetype)initWithURL:(NSURL *)url {
     if ((self = [super init])) {
-        _url = url; _gif = gif; _player = [AVQueuePlayer new];
+        _url = url; _player = [AVQueuePlayer new];
         _looper = [AVPlayerLooper playerLooperWithPlayer:_player templateItem:[AVPlayerItem playerItemWithURL:url]];
         _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,740,480) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
         _window.title = @"LoopCapture - Preview"; _window.releasedWhenClosed = NO; _window.delegate = self;
@@ -226,12 +284,12 @@ static BOOL CopyClip(NSURL *url, BOOL image) {
         NSView *root = [NSView new]; _window.contentView = root;
         AVPlayerView *video = [AVPlayerView new];
         video.player = _player; video.controlsStyle = AVPlayerViewControlsStyleInline; video.videoGravity = AVLayerVideoGravityResizeAspect;
-        NSTextField *note = [NSTextField labelWithString:gif ? @"Saved • Animation copied" : @"Saved • Video copied"];
+        NSTextField *note = [NSTextField labelWithString:@"MP4 saved"];
         note.textColor = NSColor.secondaryLabelColor;
-        NSButton *copy = [NSButton buttonWithTitle:@"Copy Animation" target:self action:@selector(copyAnimation:)]; copy.keyEquivalent = @"c"; copy.enabled = gif != nil;
+        _gifButton = [NSButton buttonWithTitle:@"Generate GIF" target:self action:@selector(generateGIF:)];
         NSButton *videoCopy = [NSButton buttonWithTitle:@"Copy Video" target:self action:@selector(copyVideo:)];
         NSButton *reveal = [NSButton buttonWithTitle:@"Show in Finder" target:self action:@selector(reveal:)];
-        NSStackView *bar = [NSStackView stackViewWithViews:@[note,copy,videoCopy,reveal]]; bar.spacing = 12; bar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+        NSStackView *bar = [NSStackView stackViewWithViews:@[note,_gifButton,videoCopy,reveal]]; bar.spacing = 12; bar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
         for (NSView *view in @[video,bar]) { view.translatesAutoresizingMaskIntoConstraints = NO; [root addSubview:view]; }
         [NSLayoutConstraint activateConstraints:@[
             [video.leadingAnchor constraintEqualToAnchor:root.leadingAnchor], [video.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
@@ -243,6 +301,34 @@ static BOOL CopyClip(NSURL *url, BOOL image) {
     return self;
 }
 - (void)finish { [_player pause]; [_looper disableLooping]; [_window orderOut:nil]; if (_closed) _closed(); }
+- (void)generateGIF:(id)sender {
+    if (!_gifButton.enabled) return;
+    if (_gif) {
+        [self copyAnimation:sender];
+        return;
+    }
+    _gifButton.enabled = NO;
+    _gifButton.title = @"Generating…";
+    NSURL *movie = _url;
+    NSURL *gif = [movie.URLByDeletingPathExtension URLByAppendingPathExtension:@"gif"];
+    __weak Preview *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSURL *staging = [gif.URLByDeletingLastPathComponent URLByAppendingPathComponent:
+            [NSString stringWithFormat:@".gif-%@.gif", NSUUID.UUID.UUIDString]];
+        NSError *error = nil;
+        NSFileManager *files = NSFileManager.defaultManager;
+        BOOL saved = ExportGIF(movie, staging, &error) && [files moveItemAtURL:staging toURL:gif error:&error];
+        [files removeItemAtURL:staging error:nil];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            Preview *preview = weakSelf;
+            if (!preview) return;
+            preview.gifButton.enabled = YES;
+            preview.gifButton.title = saved ? @"Copy GIF" : @"Generate GIF";
+            if (saved) preview.gif = gif;
+            else if (preview.failed) preview.failed(error.localizedDescription ?: @"Could not save the GIF.");
+        });
+    });
+}
 - (void)copyAnimation:(id)sender { if (!CopyClip(_gif,YES) && _failed) _failed(@"Could not copy the animation."); }
 - (void)copyVideo:(id)sender { if (!CopyClip(_url,NO) && _failed) _failed(@"Could not copy the video."); }
 - (void)reveal:(id)sender { [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[_url]]; }
@@ -423,7 +509,7 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
 }
 - (void)preview:(NSURL *)url {
     __weak App *weakSelf = self;
-    _state = Publishing(url); _status.button.title = @" Copying…";
+    _state = Publishing(url); _status.button.title = @" Saving…";
     NSURL *folder = ScreenshotFolder();
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         @autoreleasepool {
@@ -432,11 +518,10 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
             NSString *stem = [NSString stringWithFormat:@"Screen Recording %@ %@",[format stringFromDate:NSDate.date],[NSUUID.UUID.UUIDString substringToIndex:8]];
             NSURL *saved = [folder URLByAppendingPathComponent:[stem stringByAppendingPathExtension:@"mp4"]];
             BOOL success = [NSFileManager.defaultManager createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:nil error:&error] && SaveDraft(url,saved,&error);
-            NSURL *gif = [saved.URLByDeletingPathExtension URLByAppendingPathExtension:@"gif"];
-            NSError *gifError = nil;
+            BOOL compact = YES;
             if (success) {
                 [NSFileManager.defaultManager removeItemAtURL:url error:nil];
-                if (!ExportGIF(saved,gif,&gifError)) gif = nil;
+                compact = CompactMovie(saved);
             }
             dispatch_async(dispatch_get_main_queue(), ^{
                 App *self = weakSelf; if (!self) return;
@@ -448,13 +533,15 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
                     [self alert:[NSString stringWithFormat:@"Could not save to %@. Your draft is retained; reopen LoopCapture to retry.\n%@",folder.path,error.localizedDescription]];
                     return;
                 }
-                BOOL copied = CopyClip(gif ?: saved,gif != nil);
-                Preview *preview = [[Preview alloc] initWithURL:saved gif:gif];
+                NSPasteboard *clipboard = NSPasteboard.generalPasteboard;
+                [clipboard clearContents];
+                BOOL copied = [clipboard writeObjects:@[saved]];
+                Preview *preview = [[Preview alloc] initWithURL:saved];
                 preview.closed = ^{ App *self = weakSelf; if (self) self->_state = Idle{}; };
                 preview.failed = ^(NSString *message) { [weakSelf alert:message]; };
                 self->_state = Reviewing(preview);
-                if (gifError) [self alert:[NSString stringWithFormat:@"MP4 saved and copied. The image animation could not be created.\n%@",gifError.localizedDescription]];
-                else if (!copied) [self alert:@"The clip is saved, but clipboard copying failed. Use Copy Animation or Copy Video to retry."];
+                if (!compact) self->_status.button.toolTip = @"Original MP4 saved at capture quality.";
+                if (!copied) [self alert:@"MP4 saved. Use Copy Video to copy it."];
             });
         }
     });
