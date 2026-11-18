@@ -19,9 +19,7 @@ If a silent loop gets the point across, turn the same clip into a GIF right in t
 3. On your first recording, macOS asks for **Screen & System Audio Recording** access. Enable LoopCapture in **System Settings → Privacy & Security**, choose **Quit & Reopen** if prompted, then press the shortcut again.
 
 The installer includes the compiled app and uses the media frameworks built into macOS.
-This release is unsigned at the installer level and has not been notarized by Apple.
-If macOS blocks it because the developer cannot be verified, and you trust this release, attempt to open it once, then use **System Settings → Privacy & Security → Open Anyway** if offered.
-See [Apple’s instructions for opening downloaded Mac software](https://support.apple.com/en-us/102445).
+The official installer is signed with Rahul Nath’s Developer ID and includes Apple’s notarization ticket.
 
 ## Record and send a clip
 
@@ -60,7 +58,7 @@ open build/LoopCapture.app
 ```
 
 The build runs the recorder’s self-tests.
-To build the downloadable installer from a clean checkout, run `python3 package_release.py`.
+To build a local unsigned installer from a clean checkout, run `python3 package_release.py`.
 To verify a clip recorded while sound was playing, run `python3 tests/check_av.py "/path/to/recording.mp4"` with FFmpeg and ffprobe installed.
 
 ## Try the browser paste demo
