@@ -1,50 +1,61 @@
 # LoopCapture
 
-Record a selected area of your Mac with system audio and save an MP4.
-LoopCapture copies the saved video file to your clipboard and opens a looping preview.
-Choose **Generate GIF** in the preview to save an animation beside the MP4, then **Copy GIF** to share it.
-Microphone capture is disabled.
+Use LoopCapture like the Mac screenshot tool for video: drag around what you want to show, then press Space when you're done.
+Record a short clip with system audio and paste it into a chat to send to a friend.
+If a silent loop gets the point across, turn the same clip into a GIF right in the preview.
 
-## Build and launch
+**[Download LoopCapture for Mac](https://github.com/rahul-nath/LoopCapture/releases/latest/download/LoopCapture-macOS-arm64.pkg)** · Apple Silicon (M-series) · macOS 15 or later
 
-Use an Apple Silicon Mac running macOS 15 or later, with Python 3 and the Apple Command Line Tools installed.
-Run these commands from the project directory:
+## Install and start
+
+1. Double-click the downloaded **LoopCapture-macOS-arm64.pkg** and follow the Installer prompts.
+2. Open **Applications → LoopCapture**. Look for the recording icon in the menu bar.
+3. On your first recording, macOS asks for **Screen & System Audio Recording** access. Enable LoopCapture in **System Settings → Privacy & Security**, choose **Quit & Reopen** if prompted, then press the shortcut again.
+
+The installer includes the compiled app and uses the media frameworks built into macOS.
+This release is unsigned at the installer level and has not been notarized by Apple.
+If macOS blocks it because the developer cannot be verified, and you trust this release, attempt to open it once, then use **System Settings → Privacy & Security → Open Anyway** if offered.
+See [Apple’s instructions for opening downloaded Mac software](https://support.apple.com/en-us/102445).
+
+## Record and send a clip
+
+1. Press **⌘ Command + ⇧ Shift + ⌃ Control + 5** while LoopCapture is running.
+2. **Drag over the area** you want to record and release to start, or press **Return** to record the whole display.
+3. Press **Space** to stop. LoopCapture saves an **MP4 with system audio**, copies the file, and opens a looping preview. Microphone audio is excluded.
+4. **Paste with ⌘V** into a chat or app that accepts video files. To copy it again, click **Copy Video**.
+5. To find the file, click **Show in Finder** in the preview. Recordings go to your Mac’s screenshot save folder, which defaults to the **Desktop**.
+
+## Make and paste an animated GIF
+
+1. Record a clip and stop it with **Space**.
+2. Click **Generate GIF** in the preview. When the animation is ready, the button changes to **Copy GIF**.
+3. Click **Copy GIF**, then **⌘V** in a message or editor that accepts animated GIFs from the clipboard.
+
+The GIF is silent and is saved beside the MP4.
+If a site accepts GIF uploads but pastes a still image, use **Show in Finder** and drag the `.gif` into the upload field.
+
+## How much space does a clip use?
+
+LoopCapture saves only the MP4 by default.
+It records at up to 30 fps with a maximum of 1920 pixels on the long edge.
+If the original file averages more than **2 GB per hour**, LoopCapture tries a smaller export targeting about **1.77 GB per hour** (roughly **30 MB per minute**, including audio).
+Clips already under budget keep their original quality.
+Actual size depends on what’s moving on screen.
+Compression can take time after a long recording and temporarily needs room for both files.
+If compression fails, the original recording is kept.
+
+## Build from source
+
+On an Apple Silicon Mac with macOS 15 or later, Python 3, and Apple Command Line Tools, run:
 
 ```sh
 python3 build.py
 open build/LoopCapture.app
 ```
 
-The build signs the app locally and runs four checks covering secondary-display coordinates, saving, overwriting, and preserving drafts after a failed save.
-The recorder uses the macOS frameworks already on your Mac.
-
-## Record a clip
-
-1. Press **Command + Shift + Control + 5**.
-2. Grant **Screen & System Audio Recording** permission if macOS asks, then quit and reopen LoopCapture.
-3. Drag to select an area, or press Return for the whole display.
-4. Press **Space** or the same shortcut to stop.
-
-Recordings are saved in your macOS screenshot folder, which defaults to the Desktop.
-Closing the preview keeps the files.
-The GIF is silent and some apps paste it as a still image.
-Video capture runs at up to 30 fps and 1920 pixels on the long edge.
-When the saved MP4 exceeds 2 GB per hour, LoopCapture tries a smaller export with a combined audio and video budget of about 1.77 GB per hour.
-The original stays available if compression fails.
-Allow temporary disk space for both files while compressing a long recording.
-
-If the shortcut opens privacy settings again after a rebuild, remove the old LoopCapture entry, add the exact app bundle you just built, enable it, and reopen it.
-
-## Verify audio
-
-Record a short clip while system audio is playing.
-With FFmpeg and ffprobe installed, run:
-
-```sh
-python3 tests/check_av.py "/path/to/recording.mp4"
-```
-
-The check looks for one video track, one audio track, similar start and end times, and audible samples in the first 30 seconds.
+The build runs the recorder’s self-tests.
+To build the downloadable installer from a clean checkout, run `python3 package_release.py`.
+To verify a clip recorded while sound was playing, run `python3 tests/check_av.py "/path/to/recording.mp4"` with FFmpeg and ffprobe installed.
 
 ## Try the browser paste demo
 

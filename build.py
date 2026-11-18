@@ -1,12 +1,16 @@
 """Build the native Apple Silicon app with the installed Apple compiler only."""
 from pathlib import Path
 import plistlib
+import shutil
 import subprocess
 
 root = Path(__file__).resolve().parent
 app = root / "build/LoopCapture.app"
 contents = app / "Contents"
 (contents / "MacOS").mkdir(parents=True, exist_ok=True)
+resources = contents / "Resources"
+resources.mkdir(exist_ok=True)
+shutil.copyfile(root / "LICENSE", resources / "LICENSE")
 plist = {
     "CFBundleExecutable": "LoopCapture",
     "CFBundleIdentifier": "local.rahul.LoopCapture",
