@@ -18,8 +18,10 @@ out.mkdir(parents=True, exist_ok=True)
 # Build in an empty directory so local recordings and stale bundle contents cannot ship.
 with tempfile.TemporaryDirectory(dir=out) as temporary:
     stage = Path(temporary)
-    for source in ("build.py", "LoopCapture.mm", "LICENSE"):
-        shutil.copyfile(root / source, stage / source)
+    for source in ("build.py", "LoopCapture.mm", "LICENSE", "assets/LoopCapture.icns"):
+        target = stage / source
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / source, target)
     subprocess.run([sys.executable, stage / "build.py", *(["--release"] if profile else [])], check=True)
     app, = (stage / "build").glob("*.app")
     requirements = stage / "requirements.plist"

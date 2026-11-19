@@ -17,14 +17,17 @@ contents = app / "Contents"
 resources = contents / "Resources"
 resources.mkdir(exist_ok=True)
 shutil.copyfile(root / "LICENSE", resources / "LICENSE")
+icon = root / "assets" / "LoopCapture.icns"
+shutil.copyfile(icon, resources / icon.name)
 plist = {
     "CFBundleExecutable": "LoopCapture",
     "CFBundleIdentifier": identifier,
     "CFBundleName": name,
     "CFBundleDisplayName": name,
     "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "1.0.2",
-    "CFBundleVersion": "3",
+    "CFBundleIconFile": icon.name,
+    "CFBundleShortVersionString": "1.0.3",
+    "CFBundleVersion": "4",
     "LSMinimumSystemVersion": "15.0",
     "LSUIElement": True,
     "LSRequiresNativeExecution": True,
