@@ -386,6 +386,7 @@ static bool IsSystemShortcut(NSArray *systemKeys,UInt32 code) {
     EventHandlerRef _handler;
     NSStatusItem *_status;
     NSMenuItem *_recordItem;
+    NSMenuItem *_stopItem;
     NSTimer *_timer;
     NSURL *_drafts;
     BOOL _permissionRequested;
@@ -426,7 +427,8 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
     if (![NSFileManager.defaultManager createDirectoryAtURL:_drafts withIntermediateDirectories:YES attributes:nil error:&error]) { [self alert:error.localizedDescription]; [NSApp terminate:nil]; return; }
     NSMenu *menu = [NSMenu new];
     _recordItem = [menu addItemWithTitle:@"Record Area" action:@selector(toggle:) keyEquivalent:@""];
-    [menu addItemWithTitle:@"Stop Recording  Space" action:@selector(stop:) keyEquivalent:@""];
+    _stopItem = [menu addItemWithTitle:@"Stop Recording" action:@selector(stop:) keyEquivalent:@""];
+    _stopItem.hidden = YES;
     [menu addItemWithTitle:@"Try Next Recording Shortcut…" action:@selector(nextShortcut:) keyEquivalent:@""];
     [menu addItemWithTitle:@"Screen Recording Access…" action:@selector(permissionSettings:) keyEquivalent:@""];
     [menu addItem:NSMenuItem.separatorItem];
@@ -581,12 +583,12 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
             capture.finished = ^{
                 App *self = weakSelf; Capture *active = weakCapture;
                 if (!self || !active || ![self owns:active]) return;
-                [self disableSpace]; [self resetRecordingStatus]; [self preview:active.url];
+                [self disableRecordingControls]; [self resetRecordingStatus]; [self preview:active.url];
             };
             capture.failed = ^(NSError *failure) {
                 App *self = weakSelf; Capture *active = weakCapture;
                 if (!self || !active || ![self owns:active]) return;
-                [self disableSpace]; [self resetRecordingStatus]; self->_state = Idle{};
+                [self disableRecordingControls]; [self resetRecordingStatus]; self->_state = Idle{};
                 [self alert:[NSString stringWithFormat:@"Recording failed.\n%@",failure.localizedDescription]];
             };
             self->_state = Starting(capture);
@@ -597,6 +599,8 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
     }];
 }
 - (void)showRecordingStatus:(BOOL)space {
+    _stopItem.title = space ? @"Stop Recording  Space" : @"Stop Recording";
+    _stopItem.hidden = NO;
     _status.button.image = [NSImage imageWithSystemSymbolName:@"stop.circle.fill" accessibilityDescription:@"Recording"];
     NSMutableArray<NSString *> *keys = [NSMutableArray array];
     if (space) [keys addObject:@"Space"];
@@ -612,7 +616,11 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
         }
     }];
 }
-- (void)disableSpace { if (_spaceKey) UnregisterEventHotKey(_spaceKey); _spaceKey = NULL; }
+- (void)disableRecordingControls {
+    _stopItem.hidden = YES;
+    if (_spaceKey) UnregisterEventHotKey(_spaceKey);
+    _spaceKey = NULL;
+}
 - (void)resetRecordingStatus {
     [_timer invalidate]; _timer = nil;
     _status.button.title = @""; _status.button.image = [NSImage imageWithSystemSymbolName:@"record.circle" accessibilityDescription:@"LoopCapture"];
@@ -620,7 +628,7 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
 }
 - (void)stop:(id)sender {
     auto recording = std::get_if<Recording>(&_state); if (!recording) return;
-    Capture *capture = recording->value; _state = Finishing(capture); [self disableSpace];
+    Capture *capture = recording->value; _state = Finishing(capture); [self disableRecordingControls];
     [capture.stream stopCaptureWithCompletionHandler:^(NSError *error) {
         if (error) dispatch_async(dispatch_get_main_queue(), ^{ if (capture.failed) capture.failed(error); });
     }];
@@ -670,7 +678,7 @@ static OSStatus HotKeyHandler(EventHandlerCallRef next, EventRef event, void *po
     else [self toggle:nil];
 }
 - (void)applicationWillTerminate:(NSNotification *)notification {
-    [self disableSpace]; if (_shortcut) UnregisterEventHotKey(_shortcut->ref); if (_handler) RemoveEventHandler(_handler);
+    [self disableRecordingControls]; if (_shortcut) UnregisterEventHotKey(_shortcut->ref); if (_handler) RemoveEventHandler(_handler);
     if (_lock >= 0) close(_lock);
 }
 @end

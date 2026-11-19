@@ -28,6 +28,17 @@ If you previously ran an unsigned or ad-hoc build, macOS may need one fresh appr
 If LoopCapture is already enabled but still denied, quit it, remove its old entry in **Privacy & Security → Screen & System Audio Recording**, then use **+** to add **/Applications/LoopCapture.app**, enable it, and reopen it.
 Subsequent official releases keep the same signing identity.
 
+### Uninstall or test a fresh permission grant
+
+Choose **Quit LoopCapture** from its menu bar icon, then move **LoopCapture** from **Applications** to the Trash.
+Your saved MP4s and GIFs stay in their recording folder.
+
+For a fresh-permission test, quit the app and run `tccutil reset ScreenCapture local.rahul.LoopCapture` in Terminal before moving it to the Trash.
+Reinstall the official package, open **Applications → LoopCapture**, and approve the first recording request.
+Quit and reopen the app, then choose **Record Area** again.
+If the selection crosshair appears without another permission prompt, macOS retained the grant.
+Press **Esc** to cancel the test.
+
 ## Record and send a clip
 
 1. Choose **Record Area** in the LoopCapture menu or press its displayed shortcut, initially **⌘ Command + ⇧ Shift + ⌃ Control + 5**.
@@ -38,7 +49,8 @@ Subsequent official releases keep the same signing identity.
 
 If the shortcut is taken, LoopCapture offers the next available digit from **5** through **9** and remembers your choice.
 If another tool intercepts the keys without reporting a conflict, choose **Try Next Recording Shortcut…** from the menu.
-**Record Area** and **Stop Recording** also work from the menu when all five shortcuts are occupied.
+**Record Area** works from the menu when all five shortcuts are occupied.
+**Stop Recording** appears in that menu only while recording.
 
 ## Make and paste an animated GIF
 
